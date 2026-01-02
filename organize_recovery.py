@@ -1,8 +1,26 @@
 import os
 import shutil
+import tkinter as tk
+from tkinter import filedialog
 from collections import defaultdict
 from PIL import Image
 from PIL.ExifTags import TAGS
+
+# ======== LOGGING / COLORS ========
+
+class C:
+    RESET = "\033[0m"
+    BOLD = "\033[1m"
+
+    RED = "\033[31m"
+    GREEN = "\033[32m"
+    YELLOW = "\033[33m"
+    BLUE = "\033[34m"
+    CYAN = "\033[36m"
+
+
+def log(tag, message, color=C.RESET):
+    print(f"{color}[{tag}]{C.RESET} {message}")
 
 # ============ CONSTANTS ============
 VIDEO_EXT = {".mp4", ".mov", ".mkv", ".avi", ".webm", ".3gp", ".mpg", ".mpeg"}
@@ -12,8 +30,7 @@ ARCHIVE_EXT = {".zip", ".rar"}
 MEDIA_EXT = VIDEO_EXT | IMAGE_EXT | AUDIO_EXT | ARCHIVE_EXT
 
 SIZE_LIMIT = 1 * 1024 * 1024 * 1024  # 1 GB
-BASE_DIR = os.getcwd()
-ORGANIZED_DIR = os.path.join(BASE_DIR, "organized")
+base_dir = os.getcwd()
 SELF_NAME = os.path.basename(__file__)
 
 # ============ GLOBALS ============
@@ -27,20 +44,58 @@ max_height = 400
 # ======== WELCOME MESSAGE ========
 
 def print_welcome():
-    print("=" * 60)
-    print(" PhotoRec Recovery Organizer & Cleanup Utility")
-    print("=" * 60)
+
+    print(C.BOLD + "=" * 60 + C.RESET)
+    print(C.BOLD + " PhotoRec Recovery Organizer & Cleanup Utility" + C.RESET)
+    print(C.BOLD + "=" * 60 + C.RESET)
     print()
     print("This tool is designed to be used AFTER running PhotoRec.")
     print("It helps organize recovered files, clean recup_dir folders,")
     print("and remove small images that are likely thumbnails.")
     print()
-    print("Make sure PhotoRec has already finished recovering files,")
-    print("and that you have proper read/write permissions.")
-    print()
-    print("Use carefully. Deletions are permanent.")
+    print(C.YELLOW + "Use carefully. Deletions are permanent." + C.RESET)
     print()
 
+# ===== DESTINATION SELECTION =====
+
+def select_destination_dir(base_dir):
+    log("INFO", "Select where the files will be organized.", C.CYAN)
+    choice = input(
+        "Use the current script folder as destination? (y/n): "
+    ).strip().lower()
+
+    if choice == "y":
+        dest_base = base_dir
+    else:
+        root = tk.Tk()
+        root.withdraw()
+        root.attributes("-topmost", True)
+
+        selected = filedialog.askdirectory(
+            title="Select destination folder for organized files"
+        )
+
+        root.destroy()
+
+        if not selected:
+            log("INFO", "No folder selected. Using current script folder.", C.CYAN)
+            dest_base = base_dir
+        else:
+            dest_base = os.path.abspath(selected)
+
+    # safety check: avoid organizing inside recup_dir.*
+    for entry in os.listdir(base_dir):
+        entry_path = os.path.join(base_dir, entry)
+        if entry.lower().startswith("recup_dir.") and dest_base.startswith(entry_path):
+            raise RuntimeError(
+                "Destination cannot be inside a recup_dir.* folder."
+            )
+
+    organized_path = os.path.join(dest_base, "organized")
+    os.makedirs(organized_path, exist_ok=True)
+
+    log("INFO", f"Organized files will be stored in:\n{organized_path}\n", C.GREEN)
+    return organized_path
 
 # ======== FILE OPERATIONS ========
 def safe_move(src, dst_dir):
@@ -81,19 +136,19 @@ def clean_recup_dirs(base_dir):
                 file_path = os.path.join(root, file)
                 try:
                     os.remove(file_path)
-                    print(f"[DELETE] {file_path}")
+                    log("DELETE", file_path, C.RED)
                 except Exception as e:
-                    print(f"[FAIL] {file_path}: {e}")
+                    log("FAIL", f"{file_path}: {e}", C.RED)
 
-def delete_small_images(base_dir, max_w, max_h):
-    print("\nStarting cleanup...")
+def delete_small_images(base_dir, organized_dir, max_w, max_h):
+
+    log("INFO", "Starting cleanup...", C.CYAN)
     deleted = 0
     scan_roots = [os.path.join(base_dir, entry) for entry in os.listdir(base_dir)
                   if os.path.isdir(os.path.join(base_dir, entry)) and entry.lower().startswith("recup_dir.")]
     
-    organized_path = os.path.join(base_dir, "organized")
-    if os.path.isdir(organized_path):
-        scan_roots.append(organized_path)
+    if os.path.isdir(organized_dir):
+        scan_roots.append(organized_dir)
 
     for root_dir in scan_roots:
         for root, _, files in os.walk(root_dir):
@@ -108,24 +163,31 @@ def delete_small_images(base_dir, max_w, max_h):
                     if width < max_w and height < max_h:
                         os.remove(file_path)
                         deleted += 1
-                        print(f"[DELETE] thumbnail {width}x{height} -> {file_path}")
+                        log("DELETE", f"thumbnail {width}x{height} -> {file_path}", C.RED)
                 except Exception:
                     continue
-    print(f"\nthumbnail cleanup completed, deleted {deleted} images")
+    log("INFO", f"thumbnail cleanup completed, deleted {deleted} images", C.GREEN)
 
 # ========= ORGANIZATION ==========
-def organize():
-    global images_no_metadata
-    large_videos_dir = os.path.join(ORGANIZED_DIR, "large_videos_1gb_plus")
-    images_with_meta = os.path.join(ORGANIZED_DIR, "images_with_metadata")
-    images_without_meta = os.path.join(ORGANIZED_DIR, "images_without_metadata")
-    os.makedirs(ORGANIZED_DIR, exist_ok=True)
+def organize(organized_dir):
 
-    for item in os.listdir(BASE_DIR):
+    global total_moved, by_extension, by_model, images_no_metadata
+
+    total_moved = 0
+    by_extension.clear()
+    by_model.clear()
+    images_no_metadata = 0
+
+    large_videos_dir = os.path.join(organized_dir, "large_videos_1gb_plus")
+    images_with_meta = os.path.join(organized_dir, "images_with_metadata")
+    images_without_meta = os.path.join(organized_dir, "images_without_metadata")
+    os.makedirs(organized_dir, exist_ok=True)
+
+    for item in os.listdir(base_dir):
         if not item.lower().startswith("recup_dir."):
             continue
-        recup_path = os.path.join(BASE_DIR, item)
-        print(f"\n[SCAN] processing folder: {item}")
+        recup_path = os.path.join(base_dir, item)
+        log("SCAN", f"processing folder: {item}", C.CYAN)
         for dirpath, _, filenames in os.walk(recup_path):
             for filename in filenames:
                 if filename == SELF_NAME:
@@ -138,22 +200,22 @@ def organize():
                 if ext in VIDEO_EXT and os.path.getsize(file_path) >= SIZE_LIMIT:
                     safe_move(file_path, large_videos_dir)
                     by_extension[ext[1:]] += 1
-                    print(f"[MOVE] large video -> {filename}")
+                    log("MOVE", f"large video -> {filename}", C.GREEN)
                 elif ext in IMAGE_EXT:
                     model = get_camera_model(file_path)
                     if model:
                         safe_move(file_path, os.path.join(images_with_meta, model))
                         by_model[model] += 1
-                        print(f"[MOVE] image with metadata ({model}) -> {filename}")
+                        log("MOVE", f"image with metadata ({model}) -> {filename}", C.GREEN)
                     else:
                         safe_move(file_path, images_without_meta)
                         images_no_metadata += 1
-                        print(f"[MOVE] image without metadata -> {filename}")
+                        log("MOVE", f"image without metadata -> {filename}", C.GREEN)
                 else:
-                    ext_dir = os.path.join(ORGANIZED_DIR, ext[1:])
+                    ext_dir = os.path.join(organized_dir, ext[1:])
                     safe_move(file_path, ext_dir)
                     by_extension[ext[1:]] += 1
-                    print(f"[MOVE] by extension ({ext[1:]}) -> {filename}")
+                    log("MOVE", f"by extension ({ext[1:]}) -> {filename}", C.GREEN)
 
 def print_summary():
     print("\n========== SUMMARY ==========")
@@ -171,10 +233,9 @@ def print_summary():
     print("=============================\n")
 
 # ============= MENU ==============
-def organizer_menu(base_dir):
+def organizer_menu(base_dir, organized_dir):
+
     global max_width, max_height
-
-
 
     while True:
         print("\nSelect an option:")
@@ -189,29 +250,29 @@ def organizer_menu(base_dir):
 
         if choice == "1":
             if input("This will move files into the organized folder. Continue? (y/n): ").strip().lower() == "y":
-                organize()
-                print("organize operation completed")
+                organize(organized_dir)
+                log("INFO", "organize operation completed", C.GREEN)
                 print_summary()
             else:
-                print("operation cancelled")
+                log("INFO", "operation cancelled", C.YELLOW)
         elif choice == "2":
             if input("This will DELETE small images. Continue? (y/n): ").strip().lower() == "y":
-                delete_small_images(base_dir, max_width, max_height)
+                delete_small_images(base_dir, organized_dir, max_width, max_height)
             else:
-                print("operation cancelled")
+                log("INFO", "operation cancelled", C.YELLOW)
         elif choice == "3":
             try:
                 max_width = int(input("Enter new maximum width: ").strip())
                 max_height = int(input("Enter new maximum height: ").strip())
-                print(f"Thumbnail size updated to {max_width}x{max_height}.")
+                log("INFO", f"Thumbnail size updated to {max_width}x{max_height}.", C.GREEN)
             except ValueError:
-                print("Invalid input. Please enter integers.")
+                log("ERROR", "Invalid input. Please enter integers.", C.RED)
         elif choice == "4":
             if input("This will DELETE ALL FILES inside recup_dir.*. Are you sure? (y/n): ").strip().lower() == "y":
                 clean_recup_dirs(base_dir)
-                print("clean operation completed")
+                log("INFO", "clean operation completed", C.GREEN)
             else:
-                print("operation cancelled")
+                log("INFO", "operation cancelled", C.YELLOW)
         elif choice == "5":
             print("\n========== HELP ==========")
             print("1 - Organize recovery files")
@@ -232,9 +293,16 @@ def organizer_menu(base_dir):
         elif choice == "0":
             break
         else:
-            print("invalid option")
+            log("ERROR", "invalid option", C.RED)
 
 # ============== MAIN =============
+
 if __name__ == "__main__":
     print_welcome()
-    organizer_menu(os.getcwd())
+    try:
+        ORGANIZED_DIR = select_destination_dir(base_dir)
+    except RuntimeError as e:
+        log("ERROR", str(e), C.RED)
+        exit(1)
+
+    organizer_menu(base_dir, ORGANIZED_DIR)
