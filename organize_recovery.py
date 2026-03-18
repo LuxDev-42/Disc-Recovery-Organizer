@@ -1,7 +1,15 @@
+import argparse
 import os
+import re
 import shutil
-import tkinter as tk
-from tkinter import filedialog
+try:
+    import tkinter as tk
+    from tkinter import filedialog
+    TK_AVAILABLE = True
+except ImportError:
+    tk = None
+    filedialog = None
+    TK_AVAILABLE = False
 from collections import defaultdict
 from PIL import Image
 from PIL.ExifTags import TAGS
@@ -21,6 +29,18 @@ class C:
 
 def log(tag, message, color=C.RESET):
     print(f"{color}[{tag}]{C.RESET} {message}")
+
+
+def sanitize_folder_name(name):
+    cleaned = re.sub(r'[<>:"/\\|?*\x00-\x1F]', "_", name).strip().strip(".")
+    return cleaned[:120] or "unknown_model"
+
+def tk_dialog_available():
+    if not TK_AVAILABLE:
+        return False
+    if os.name == "nt":
+        return True
+    return bool(os.environ.get("DISPLAY") or os.environ.get("WAYLAND_DISPLAY"))
 
 # ============ CONSTANTS ============
 VIDEO_EXT = {".mp4", ".mov", ".mkv", ".avi", ".webm", ".3gp", ".mpg", ".mpeg"}
@@ -58,38 +78,56 @@ def print_welcome():
 
 # ===== DESTINATION SELECTION =====
 
-def select_destination_dir(base_dir):
+def select_destination_dir(base_dir, preferred_dest=None):
     log("INFO", "Select where the files will be organized.", C.CYAN)
-    choice = input(
-        "Use the current script folder as destination? (y/n): "
-    ).strip().lower()
-
-    if choice == "y":
-        dest_base = base_dir
+    if preferred_dest:
+        dest_base = os.path.abspath(preferred_dest)
     else:
-        root = tk.Tk()
-        root.withdraw()
-        root.attributes("-topmost", True)
+        choice = input(
+            "Use the current script folder as destination? (y/n): "
+        ).strip().lower()
 
-        selected = filedialog.askdirectory(
-            title="Select destination folder for organized files"
-        )
-
-        root.destroy()
-
-        if not selected:
-            log("INFO", "No folder selected. Using current script folder.", C.CYAN)
+        if choice == "y":
             dest_base = base_dir
         else:
-            dest_base = os.path.abspath(selected)
+            selected = ""
+            root = None
+            if tk_dialog_available():
+                try:
+                    root = tk.Tk()
+                    root.withdraw()
+                    root.attributes("-topmost", True)
+                    selected = filedialog.askdirectory(
+                        title="Select destination folder for organized files"
+                    )
+                except tk.TclError:
+                    log("WARN", "Display problem detected. Falling back to current folder.", C.YELLOW)
+                finally:
+                    if root is not None:
+                        root.destroy()
+            else:
+                log("WARN", "GUI folder picker unavailable. Please type the destination path.", C.YELLOW)
+                selected = input("Destination folder (leave blank for current folder): ").strip()
 
-    # safety check: avoid organizing inside recup_dir.*
+            if not selected:
+                log("INFO", "No folder selected. Using current script folder.", C.CYAN)
+                dest_base = base_dir
+            else:
+                dest_base = os.path.abspath(selected)
+
+    dest_base_real = os.path.realpath(dest_base)
     for entry in os.listdir(base_dir):
         entry_path = os.path.join(base_dir, entry)
-        if entry.lower().startswith("recup_dir.") and dest_base.startswith(entry_path):
-            raise RuntimeError(
-                "Destination cannot be inside a recup_dir.* folder."
-            )
+        if not entry.lower().startswith("recup_dir."):
+            continue
+        entry_real = os.path.realpath(entry_path)
+        try:
+            if os.path.commonpath([dest_base_real, entry_real]) == entry_real:
+                raise RuntimeError(
+                    "Destination cannot be inside a recup_dir.* folder."
+                )
+        except ValueError:
+            continue
 
     organized_path = os.path.join(dest_base, "organized")
     os.makedirs(organized_path, exist_ok=True)
@@ -169,7 +207,7 @@ def delete_small_images(base_dir, organized_dir, max_w, max_h):
     log("INFO", f"thumbnail cleanup completed, deleted {deleted} images", C.GREEN)
 
 # ========= ORGANIZATION ==========
-def organize(organized_dir):
+def organize(base_dir, organized_dir):
 
     global total_moved, by_extension, by_model, images_no_metadata
 
@@ -197,16 +235,26 @@ def organize(organized_dir):
                 if ext not in MEDIA_EXT:
                     continue
                 
-                if ext in VIDEO_EXT and os.path.getsize(file_path) >= SIZE_LIMIT:
+                if ext in VIDEO_EXT:
+                    try:
+                        is_large_video = os.path.getsize(file_path) >= SIZE_LIMIT
+                    except OSError as e:
+                        log("FAIL", f"could not read size for {file_path}: {e}", C.RED)
+                        continue
+                else:
+                    is_large_video = False
+
+                if is_large_video:
                     safe_move(file_path, large_videos_dir)
                     by_extension[ext[1:]] += 1
                     log("MOVE", f"large video -> {filename}", C.GREEN)
                 elif ext in IMAGE_EXT:
                     model = get_camera_model(file_path)
                     if model:
-                        safe_move(file_path, os.path.join(images_with_meta, model))
-                        by_model[model] += 1
-                        log("MOVE", f"image with metadata ({model}) -> {filename}", C.GREEN)
+                        safe_model = sanitize_folder_name(model)
+                        safe_move(file_path, os.path.join(images_with_meta, safe_model))
+                        by_model[safe_model] += 1
+                        log("MOVE", f"image with metadata ({safe_model}) -> {filename}", C.GREEN)
                     else:
                         safe_move(file_path, images_without_meta)
                         images_no_metadata += 1
@@ -250,7 +298,7 @@ def organizer_menu(base_dir, organized_dir):
 
         if choice == "1":
             if input("This will move files into the organized folder. Continue? (y/n): ").strip().lower() == "y":
-                organize(organized_dir)
+                organize(base_dir, organized_dir)
                 log("INFO", "organize operation completed", C.GREEN)
                 print_summary()
             else:
@@ -295,12 +343,17 @@ def organizer_menu(base_dir, organized_dir):
         else:
             log("ERROR", "invalid option", C.RED)
 
-# ============== MAIN =============
-
 if __name__ == "__main__":
+    parser = argparse.ArgumentParser(description="Organize PhotoRec outputs.")
+    parser.add_argument(
+        "-d",
+        "--dest",
+        help="Destination folder for the 'organized' directory (defaults to script folder).",
+    )
+    args = parser.parse_args()
     print_welcome()
     try:
-        ORGANIZED_DIR = select_destination_dir(base_dir)
+        ORGANIZED_DIR = select_destination_dir(base_dir, preferred_dest=args.dest)
     except RuntimeError as e:
         log("ERROR", str(e), C.RED)
         exit(1)
