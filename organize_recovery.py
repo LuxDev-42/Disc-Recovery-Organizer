@@ -66,7 +66,7 @@ max_height = 400
 def print_welcome():
 
     print(C.BOLD + "=" * 60 + C.RESET)
-    print(C.BOLD + " PhotoRec Recovery Organizer & Cleanup Utility" + C.RESET)
+    print(C.BOLD + " Organizer & Cleanup Utility for PhotoRec Recovery" + C.RESET)
     print(C.BOLD + "=" * 60 + C.RESET)
     print()
     print("This tool is designed to be used AFTER running PhotoRec.")
