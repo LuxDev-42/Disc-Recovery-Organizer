@@ -42,6 +42,12 @@ def tk_dialog_available():
         return True
     return bool(os.environ.get("DISPLAY") or os.environ.get("WAYLAND_DISPLAY"))
 
+def has_recup_dirs(base_dir):
+    return any(
+        entry.lower().startswith("recup_dir.")
+        for entry in os.listdir(base_dir)
+    )
+
 # ============ CONSTANTS ============
 VIDEO_EXT = {".mp4", ".mov", ".mkv", ".avi", ".webm", ".3gp", ".mpg", ".mpeg"}
 IMAGE_EXT = {".jpg", ".jpeg", ".png", ".heic", ".heif", ".webp", ".bmp", ".tiff"}
@@ -50,7 +56,7 @@ ARCHIVE_EXT = {".zip", ".rar"}
 MEDIA_EXT = VIDEO_EXT | IMAGE_EXT | AUDIO_EXT | ARCHIVE_EXT
 
 SIZE_LIMIT = 1 * 1024 * 1024 * 1024  # 1 GB
-base_dir = os.getcwd()
+base_dir = os.path.dirname(os.path.abspath(__file__))
 SELF_NAME = os.path.basename(__file__)
 
 # ============ GLOBALS ============
@@ -352,6 +358,15 @@ if __name__ == "__main__":
     )
     args = parser.parse_args()
     print_welcome()
+    log("INFO", f"Scanning for recup_dir.* folders in:\n{base_dir}\n", C.CYAN)
+    if not has_recup_dirs(base_dir):
+        log(
+            "WARN",
+            "No recup_dir.* folders found here. Make sure this script "
+            "is saved inside the same folder as PhotoRec's recup_dir.* "
+            "output before running it.",
+            C.YELLOW,
+        )
     try:
         ORGANIZED_DIR = select_destination_dir(base_dir, preferred_dest=args.dest)
     except RuntimeError as e:
